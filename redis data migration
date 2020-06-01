@@ -1,0 +1,180 @@
+
+键迁移
+有时候我们想将一个redis的数据迁移到另一个redis中，redis提供了三种方式来满足数据迁移的需求，分别是move、dump+restore、migrate
+
+方案一、move key db
+
+Redis支持多数据库，多数据库之间彼此在数据上是隔离的。move key db就是把指定的键从源数据库迁移到目标数据库中。仅仅是基于redis内部数据库之间的迁移，由于多数据库在生产环境中不建议使用，所以此命令很少使用到。
+192.168.72.1:6379[9]> select 11
+OK
+192.168.72.1:6379[11]> keys *
+(empty list or set)
+192.168.72.1:6379[11]> select 10
+OK
+192.168.72.1:6379[10]> keys *
+1) "333"
+2) "222"
+3) "search_news:start_urls"
+4) "111"
+192.168.72.1:6379[10]> move 111 11
+(integer) 1
+192.168.72.1:6379[10]> keys *
+1) "333"
+2) "222"
+3) "search_news:start_urls"
+192.168.72.1:6379[10]> select 11
+OK
+192.168.72.1:6379[11]> keys *
+1) "111"
+
+方案二、dump + restore
+dump key
+restore key ttl value
+1.在源Redis上，dump命令会将键值序列化，格式采用RDB格式。
+2.在目标Redis上，restore命令将上面序列化的值进行复原，其中ttl参数表示过期时间，ttl=0代表永不过期。
+需要注意的是：
+一、整个迁移过程并非原子性的，而是通过客户端分部完成的。
+二、迁移过程是开启了两个客户端连接，所以dump得结果不是在源Redis和目标Redis之间进行传输。
+Redis-source上执行的操作
+127.0.0.1:6379> set abc 'good luck'
+OK
+127.0.0.1:6379> dump abc
+"\x00\tgood luck\t\x00\xa2.\x89\x1c\x93_\xa7="
+
+在Redis-source上设置一个新的键值，将此键值进行序列化。
+Redis-target上执行的操作
+127.0.0.1:6380> get abc
+(nil)
+127.0.0.1:6380> restore abc 0 "\x00\tgood luck\t\x00\xa2.\x89\x1c\x93_\xa7="
+OK
+127.0.0.1:6380> get abc
+"good luck"
+
+ 在Redis-target上查看当前可以不存在后，将序列化后的key进行复原
+
+
+
+
+方案三、Migrate
+migrate用于在Redis实例间进行数据迁移，实际上migrate命令是将dump、restore、del三个命令进行组合，从而简化了操作流程。migrate命令具有原子性，从Redis 3.0.6版本后已经支持迁移多个键的功能。migrate命令的数据传输直接在源Redis和目标Redis上完成，目标Redis完成restore后会发送OK给源Redis。
+migrate参数：
+  ● host：目标Redis的IP地址
+  ● port：目标Redis的端口
+  ● key|""：Redis 3.0.6 后如果需要迁移多个键，此处为空字符串""
+  ● destination-db：目标Redis的数据库索引
+  ● timeout：迁移的超时时间（单位为毫秒）
+  ● copy：如果添加此选项后，迁移后不删除源键。
+  ● replace：如果添加此选项migrate不管目标Redis是否存在该键都会正常迁移进行数据覆盖
+  ● keys：如果要删除多个建，填写keys key1 key2 key3
+Redis-source
+127.0.0.1:6379> set key1 Federico
+OK
+127.0.0.1:6379> set key2 sunshine
+OK
+127.0.0.1:6379> keys *
+1) "key1"
+2) "key2"
+127.0.0.1:6379> MIGRATE 127.0.0.1 6380 key1 0 1000
+OK
+127.0.0.1:6379> keys *
+1) "key2"
+
+Redis-target
+127.0.0.1:6380> keys *
+1) "key1"
+127.0.0.1:6380> GET key1
+"Federico"
+
+ 从源Redis上看到，我们设置了两个键，执行默认参数迁移后只有了一个键。而在目标Redis上已经成功迁移过去了这个键。如果想同时保留源Redis上的数据，可以加上我们上面提到过的参数。
+Redis-source
+127.0.0.1:6379> keys *
+1) "key2"
+127.0.0.1:6379> MIGRATE 127.0.0.1 6380 key2 0 1000 copy
+OK
+127.0.0.1:6379> keys *
+1) "key2"
+
+Redis-traget
+127.0.0.1:6380> keys *
+1) "key1"
+2) "key2"
+127.0.0.1:6380> get key2
+"sunshine"
+
+
+单个键：
+127.0.0.1:6380> migrate 127.0.0.1 6381 abc  0 10000 replace
+多个键：
+ 127.0.0.1:6380> migrate 127.0.0.1 6381 ''  0 10000 replace keys ab1 ab2 ab3 ab4 ab5
+
+
+Different
+
+COMMANDACTION SCOPEAUTOMICSUPPORT KEYSmoveinner redisYESNOdump+restoreinner redisNOYESmigrateinner redisYESYES
+
+
+文本迁移
+
+方案一、RDB文件迁移方式
+1、源redis服务器
+登录redis服务器，然后通过redis的客户端进行连接redis，命令如下：
+[root@ ~]# redis-cli
+127.0.0.1:6379> 
+注释：如果没有将redis-cli安装成服务，可以进入redis的src目录下进行客户端的连接
+
+连接成功后，我们可以通过下面的命令找到redis的文件存放目录
+127.0.0.1:6379> CONFIG GET dir
+1) "dir"
+2) "/var/lib/redis"
+127.0.0.1:6379> 
+
+下面我们查看一下redis数据备份的触发条件，查看redis配置文件/ect/redis.conf ，可以看到redis数据备份的触发条件为：
+save 900 1     #900秒内至少有1个key被更改，进行备份
+save 300 10    #300秒内至少有300个key被更改，进行备份
+save 60 10000  #60秒内至少有10000个key被更改，进行备份
+
+我们可以通过 save的方式直接对此时的数据进行备份，命令如下：
+[root@ ~]# redis-cli
+127.0.0.1:6379> save   #数据备份
+127.0.0.1:6379>  #退出
+这个时候我们可以在redis的文件存放目录/var/lib/redis目录下看到刚刚备份的dump.rdb文件
+
+2、目标redis服务器
+登录目标redis服务器，我们先停止redis服务：
+service redis stop  #停止redis服务
+
+然后进入redis的文件存放目录/var/lib/redis,把刚刚备份的dump.rdb文件替换该目录下的dump.rdb文件
+（建议先备份当前目录下的dump.rdb文件），重启redis服务
+service redis start #启动redis服务
+到此，redis数据迁移完成
+
+方案二、AOF方式文件迁移
+以日志的形式来记录每个写操作，将Redis执行过的所有写指令记录下来(读操作不记录)，只许追加文件但不可以改写文件，redis启动之初会读取该文件重新构建数据，换言之，redis重启的话就根据日志文件的内容将写指令从前到后执行一次以完成数据的恢复工作。
+1、源实例生成aof数据
+
+2、目标实例导入aof数据
+
+
+
+工具迁移
+
+方案一、redis-dump
+
+安装rvm
+安装ruby
+安装redis-dump
+
+数据迁移
+redis转存储json
+$ redis-dump -u 127.0.0.1:6378 -a password > /watcherlab/data/dnsData/redis_6378.json
+
+json还原redis
+$ < redis_6378.json redis-load -u 127.0.0.1 -a password
+
+
+备注：
+redis-dump安装：
+https://blog.csdn.net/vkingnew/article/details/83016135
+redis下载地址：
+http://download.redis.io/releases/
+
